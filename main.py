@@ -233,8 +233,18 @@ def post_to_discord(message):
                 )
 
         except urllib.error.HTTPError as e:
-            # URLやWebhookの認証情報はログに出さない
             print(f"Discord HTTP error: {e.code}")
+
+            # 原因調査に必要なヘッダーだけ出力
+            for key in (
+                "Server",
+                "Content-Type",
+                "CF-Ray",
+                "Retry-After",
+            ):
+                value = e.headers.get(key)
+                if value:
+                    print(f"{key}: {value}")
 
             try:
                 error_body = e.read().decode(
@@ -243,7 +253,7 @@ def post_to_discord(message):
                 )
                 print(f"Discord error response: {error_body[:2000]}")
             except Exception:
-                print("Discordのエラー本文を取得できませんでした。")
+                print("エラー本文を取得できませんでした。")
 
             raise
 
