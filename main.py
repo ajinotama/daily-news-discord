@@ -1,4 +1,3 @@
-
 import os
 import json
 import urllib.request
@@ -15,11 +14,11 @@ from openai import OpenAI
 
 JST = timezone(timedelta(hours=9))
 
-# 既存のGitHub Secretsから読み込む
+# GitHub Secretsから読み込む
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 DISCORD_WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 
-# 既存コードで使用していたモデル名を維持
+# 既存のモデル設定を維持
 OPENAI_MODEL = "gpt-6-luna"
 
 # Google News RSS
@@ -43,6 +42,7 @@ NEWS_FEEDS = {
 
 MAX_ARTICLES_PER_FEED = 15
 MAX_ARTICLES_TOTAL = 45
+DISCORD_MAX_CHUNK_LENGTH = 1900
 
 
 # ============================================================
@@ -94,7 +94,10 @@ def fetch_news():
                     break
 
         except Exception as e:
-            print(f"RSS取得エラー ({category}): {type(e).__name__}: {e}")
+            print(
+                f"RSS取得エラー ({category}): "
+                f"{type(e).__name__}: {e}"
+            )
 
     articles = articles[:MAX_ARTICLES_TOTAL]
 
@@ -189,27 +192,35 @@ def summarize_news(articles):
 
 
 # ============================================================
-# Discord投稿
+# Discord投稿用のメッセージ分割
 # ============================================================
 
-def post_to_discord(message):
-    # Discordの通常メッセージ上限は2000文字。
-    # 長い場合は複数のメッセージに分割する。
+def split_message(message, max_length=DISCORD_MAX_CHUNK_LENGTH):
     chunks = []
     remaining = message
 
     while remaining:
-        if len(remaining) <= 1900:
+        if len(remaining) <= max_length:
             chunks.append(remaining)
             break
 
-        split_at = remaining.rfind("\n", 0, 1900)
+        split_at = remaining.rfind("\n", 0, max_length)
 
         if split_at < 500:
-            split_at = 1900
+            split_at = max_length
 
         chunks.append(remaining[:split_at])
         remaining = remaining[split_at:].lstrip()
+
+    return chunks
+
+
+# ============================================================
+# Discord投稿
+# ============================================================
+
+def post_to_discord(message):
+    chunks = split_message(message)
 
     for index, chunk in enumerate(chunks, start=1):
         payload = {
@@ -219,23 +230,35 @@ def post_to_discord(message):
 
         request = urllib.request.Request(
             DISCORD_WEBHOOK_URL,
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            data=json.dumps(
+                payload,
+                ensure_ascii=False,
+            ).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": (
+                    "DiscordBot "
+                    "(https://github.com/tamabuchi0411/"
+                    "daily-news-discord, 1.0)"
+                ),
+            },
             method="POST",
         )
 
         try:
-            with urllib.request.urlopen(request, timeout=20) as response:
+            with urllib.request.urlopen(
+                request,
+                timeout=20,
+            ) as response:
                 print(
-                    f"Discord投稿成功: "
-                    f"HTTP {response.status} "
+                    f"Discord投稿成功: HTTP {response.status} "
                     f"({index}/{len(chunks)})"
                 )
 
         except urllib.error.HTTPError as e:
             print(f"Discord HTTP error: {e.code}")
 
-            # 原因調査に必要なヘッダーだけ出力
+            # 原因調査用。Webhook URLや認証情報は出力しない
             for key in (
                 "Server",
                 "Content-Type",
@@ -251,7 +274,10 @@ def post_to_discord(message):
                     "utf-8",
                     errors="replace",
                 )
-                print(f"Discord error response: {error_body[:2000]}")
+                print(
+                    f"Discord error response: "
+                    f"{error_body[:2000]}"
+                )
             except Exception:
                 print("エラー本文を取得できませんでした。")
 
@@ -271,7 +297,8 @@ def main():
 
     if not articles:
         raise RuntimeError(
-            "ニュースを取得できませんでした。RSSの状態を確認してください。"
+            "ニュースを取得できませんでした。"
+            "RSSの状態を確認してください。"
         )
 
     briefing = summarize_news(articles)
