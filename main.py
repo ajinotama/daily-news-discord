@@ -1,69 +1,68 @@
 import os
-import json
 import re
+import json
+import html
+import time
 import urllib.parse
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import feedparser
+import trafilatura
 from openai import OpenAI
-
-
-# ============================================================
-# 基本設定
-# ============================================================
 
 JST = timezone(timedelta(hours=9))
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 DISCORD_WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
-OPENAI_MODEL = "gpt-6-luna"
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "news.md")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, "news.md")
 GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
+MAX_AGE_HOURS_DEFAULT = 48
+
 USER_AGENT = (
-    "DiscordBot "
-    "(https://github.com/tamabuchi0411/daily-news-discord, 1.0)"
+    "Mozilla/5.0 (compatible; DailyNewsBriefing/1.0; "
+    "+https://github.com/tamabuchi0411/daily-news-discord)"
 )
 
 DEFAULTS = {
-    "当日記事のみ": "false",
-    "RSS取得上限（カテゴリごと）": "20",
-    "AIに渡す上限（全体）": "45",
+    "記事の最大経過時間（時間）": "48",
+    "RSS取得上限（カテゴリごと）": "12",
+    "AIに渡す上限（全体）": "100",
     "Discordに掲載するニュース数": "15",
+    "記事本文の取得": "true",
 }
 
 
-# ============================================================
-# Markdown設定の読み込み
-# ============================================================
+# ------------------------------------------------------------
+# 設定ファイル
+# ------------------------------------------------------------
 
-def parse_bullet_section(text, heading):
-    """指定見出しの配下にある箇条書きを取得する。"""
-    pattern = rf"(?ms)^## {re.escape(heading)}\s*\n(.*?)(?=^## |\Z)"
+def get_section(text, heading, level=2):
+    hashes = "#" * level
+    pattern = (
+        rf"(?ms)^{hashes} {re.escape(heading)}\s*\n"
+        rf"(.*?)(?=^#{{1,{level}}} |\Z)"
+    )
     match = re.search(pattern, text)
-    if not match:
-        return []
-
-    items = []
-    for line in match.group(1).splitlines():
-        line = line.strip()
-        if line.startswith("- "):
-            value = line[2:].strip()
-            if value:
-                items.append(value)
-    return items
+    return match.group(1) if match else ""
 
 
-def parse_key_value_section(text, heading):
-    """指定見出し配下の '- キー: 値' を辞書にする。"""
+def parse_bullets(text, heading):
+    body = get_section(text, heading)
+    return [
+        line.strip()[2:].strip()
+        for line in body.splitlines()
+        if line.strip().startswith("- ")
+    ]
+
+
+def parse_key_values(text, heading):
     result = {}
-    pattern = rf"(?ms)^## {re.escape(heading)}\s*\n(.*?)(?=^## |\Z)"
-    match = re.search(pattern, text)
-    if not match:
-        return result
-
-    for line in match.group(1).splitlines():
+    for line in get_section(text, heading).splitlines():
         line = line.strip()
         if line.startswith("- ") and ": " in line:
             key, value = line[2:].split(": ", 1)
@@ -72,37 +71,23 @@ def parse_key_value_section(text, heading):
 
 
 def load_config():
-    if not os.path.exists(CONFIG_PATH):
+    if not os.path.isfile(CONFIG_PATH):
         raise FileNotFoundError(
-            f"設定ファイルがありません: {CONFIG_PATH}"
+            f"設定ファイルが見つかりません: {CONFIG_PATH}"
         )
 
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        text = f.read()
+    with open(CONFIG_PATH, "r", encoding="utf-8") as file:
+        text = file.read()
 
-    common = parse_key_value_section(text, "共通設定")
     settings = dict(DEFAULTS)
-    settings.update(common)
-
-    priority = parse_bullet_section(text, "優先キーワード")
-    exclude = parse_bullet_section(text, "除外キーワード")
+    settings.update(parse_key_values(text, "共通設定"))
 
     categories = []
-    category_pattern = (
-        r"(?ms)^### (.+?)\s*\n(.*?)(?=^### |\Z)"
-    )
+    category_section = get_section(text, "カテゴリ")
 
-    category_section_match = re.search(
-        r"(?ms)^## カテゴリ\s*\n(.*?)(?=^## |\Z)",
-        text,
-    )
-    category_text = (
-        category_section_match.group(1)
-        if category_section_match
-        else ""
-    )
+    pattern = r"(?ms)^### (.+?)\s*\n(.*?)(?=^### |\Z)"
 
-    for match in re.finditer(category_pattern, category_text):
+    for match in re.finditer(pattern, category_section):
         name = match.group(1).strip()
         body = match.group(2)
         values = {}
@@ -115,7 +100,6 @@ def load_config():
 
         query = values.get("検索語", "").strip()
         if not query:
-            print(f"カテゴリをスキップ（検索語なし）: {name}")
             continue
 
         try:
@@ -126,9 +110,7 @@ def load_config():
                 )
             )
         except ValueError:
-            limit = int(
-                settings["RSS取得上限（カテゴリごと）"]
-            )
+            limit = 12
 
         categories.append({
             "name": name,
@@ -139,31 +121,36 @@ def load_config():
 
     if not categories:
         raise RuntimeError(
-            "news.mdからカテゴリを読み込めませんでした。"
+            "news.mdからカテゴリを読み込めません。"
             "各カテゴリに「- 検索語: ...」を設定してください。"
         )
 
+    try:
+        max_age_hours = int(
+            settings["記事の最大経過時間（時間）"]
+        )
+        if max_age_hours <= 0:
+            raise ValueError
+    except ValueError:
+        max_age_hours = MAX_AGE_HOURS_DEFAULT
+
     return {
         "settings": settings,
-        "priority": priority,
-        "exclude": exclude,
+        "max_age_hours": max_age_hours,
+        "exclude": parse_bullets(text, "除外キーワード"),
         "categories": categories,
         "text": text,
     }
 
 
-# ============================================================
-# ニュース取得・一次選別
-# ============================================================
+# ------------------------------------------------------------
+# 日時・RSS取得
+# ------------------------------------------------------------
 
-def build_feed_url(query):
-    params = {
-        "q": query,
-        "hl": "ja",
-        "gl": "JP",
-        "ceid": "JP:ja",
-    }
-    return GOOGLE_NEWS_RSS + "?" + urllib.parse.urlencode(params)
+def clean_text(value):
+    value = html.unescape(value or "")
+    value = re.sub(r"<[^>]+>", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
 
 
 def parse_published(entry):
@@ -172,177 +159,227 @@ def parse_published(entry):
         return None
 
     try:
-        from datetime import datetime
-        from time import mktime
-
+        from calendar import timegm
         return datetime.fromtimestamp(
-            mktime(parsed),
+            timegm(parsed),
             tz=timezone.utc,
         )
     except (ValueError, OverflowError, OSError):
         return None
 
 
-def article_priority(article, keywords):
-    text = f"{article['title']} {article['summary']}".lower()
-    return sum(
-        1
-        for keyword in keywords
-        if keyword.lower() in text
+def build_feed_url(query):
+    params = {
+        "q": query,
+        "hl": "ja",
+        "gl": "JP",
+        "ceid": "JP:ja",
+    }
+    return (
+        GOOGLE_NEWS_RSS
+        + "?"
+        + urllib.parse.urlencode(params)
     )
 
 
 def fetch_news(config):
-    print("ニュース取得開始:", datetime.now(JST).isoformat())
-
-    try:
-        per_feed_limit = int(
-            config["settings"]["RSS取得上限（カテゴリごと）"]
-        )
-    except ValueError:
-        per_feed_limit = 20
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=config["max_age_hours"])
 
     try:
         total_limit = int(
             config["settings"]["AIに渡す上限（全体）"]
         )
     except ValueError:
-        total_limit = 45
+        total_limit = 100
 
-    only_today = (
-        config["settings"].get("当日記事のみ", "false").lower()
-        in ("true", "yes", "1")
-    )
+    exclude_words = [
+        word.lower() for word in config["exclude"]
+    ]
 
-    priority_keywords = config["priority"]
-    exclude_keywords = config["exclude"]
     articles = []
     seen_links = set()
+    rejected_old = 0
+    rejected_unknown_date = 0
 
-    now_jst = datetime.now(JST)
-    start_of_day = now_jst.replace(
-        hour=0,
-        minute=0,
-        second=0,
-        microsecond=0,
+    print("ニュース取得開始:", datetime.now(JST).isoformat())
+    print(
+        f"記事の最大経過時間: {config['max_age_hours']}時間"
     )
 
     for category in config["categories"]:
         print(f"RSS取得中: {category['name']}")
-        url = build_feed_url(category["query"])
 
         try:
-            feed = feedparser.parse(url)
+            feed = feedparser.parse(
+                build_feed_url(category["query"])
+            )
 
-            if feed.bozo and not feed.entries:
-                print(f"RSS取得失敗: {category['name']}")
-                continue
-
-            category_count = 0
-            limit = min(category["limit"], per_feed_limit)
+            count = 0
 
             for entry in feed.entries:
-                title = entry.get("title", "").strip()
+                title = clean_text(entry.get("title", ""))
                 link = entry.get("link", "").strip()
-                summary = re.sub(
-                    r"<[^>]+>",
-                    " ",
-                    entry.get("summary", ""),
-                ).strip()
+                summary = clean_text(entry.get("summary", ""))
 
                 if not title or not link or link in seen_links:
                     continue
 
-                combined = f"{title} {summary}".lower()
+                published_at = parse_published(entry)
 
-                if any(
-                    word.lower() in combined
-                    for word in exclude_keywords
-                ):
+                # 公開日時が分からない記事は安全側に倒して除外
+                if published_at is None:
+                    rejected_unknown_date += 1
                     continue
 
-                published_dt = parse_published(entry)
+                # 配信時点から48時間を超えた記事を除外
+                if published_at < cutoff:
+                    rejected_old += 1
+                    continue
 
-                if only_today and published_dt:
-                    if published_dt.astimezone(JST) < start_of_day:
-                        continue
+                combined = f"{title} {summary}".lower()
+
+                if any(word in combined for word in exclude_words):
+                    continue
 
                 seen_links.add(link)
 
-                article = {
+                articles.append({
                     "category": category["name"],
                     "title": title,
                     "link": link,
-                    "summary": summary[:800],
-                    "published": entry.get("published", ""),
-                    "priority_score": article_priority(
-                        {
-                            "title": title,
-                            "summary": summary,
-                        },
-                        priority_keywords,
-                    ),
+                    "rss_summary": summary[:2000],
+                    "published": published_at.isoformat(),
+                    "published_dt": published_at,
                     "focus": category["focus"],
-                }
+                })
 
-                articles.append(article)
-                category_count += 1
+                count += 1
 
-                if category_count >= limit:
+                if count >= category["limit"]:
                     break
 
-        except Exception as e:
+        except Exception as exc:
             print(
                 f"RSS取得エラー ({category['name']}): "
-                f"{type(e).__name__}: {e}"
+                f"{type(exc).__name__}: {exc}"
             )
 
-    # 特定カテゴリに偏らないよう、カテゴリごとの候補を交互に採用する。
-    # キーワード一致数は補助的に使い、ニュースの幅を優先する。
+    # カテゴリ別の候補を交互に並べる
     by_category = {}
-
     for article in articles:
         by_category.setdefault(
-            article["category"],
-            [],
+            article["category"], []
         ).append(article)
 
-    for category_articles in by_category.values():
-        category_articles.sort(
-            key=lambda item: item["priority_score"],
-            reverse=True,
-        )
-
     balanced = []
-    max_depth = max(
-        (len(items) for items in by_category.values()),
-        default=0,
-    )
+    depth = 0
 
-    for depth in range(max_depth):
+    while len(balanced) < total_limit:
+        added = False
+
         for category in config["categories"]:
             items = by_category.get(category["name"], [])
 
             if depth < len(items):
                 balanced.append(items[depth])
+                added = True
 
-                if len(balanced) >= max(1, total_limit):
+                if len(balanced) >= total_limit:
                     break
 
-        if len(balanced) >= max(1, total_limit):
+        if not added:
             break
 
-    articles = balanced
+        depth += 1
 
-    print(f"取得記事数（一次選別後）: {len(articles)}")
-    return articles
+    print(f"48時間超で除外: {rejected_old}件")
+    print(f"公開日時不明で除外: {rejected_unknown_date}件")
+    print(f"AIに渡す記事数: {len(balanced)}件")
+
+    return balanced
 
 
-# ============================================================
+# ------------------------------------------------------------
+# 記事本文の取得
+# ------------------------------------------------------------
+
+def fetch_article_text(article):
+    try:
+        downloaded = trafilatura.fetch_url(article["link"])
+
+        if downloaded:
+            extracted = trafilatura.extract(
+                downloaded,
+                include_comments=False,
+                include_tables=False,
+                favor_precision=True,
+            )
+
+            if extracted and len(extracted) >= 250:
+                article["article_text"] = extracted[:9000]
+                article["body_source"] = "本文"
+                return article
+
+    except Exception as exc:
+        print(
+            f"本文取得失敗: {article['title'][:50]} "
+            f"({type(exc).__name__})"
+        )
+
+    article["article_text"] = article["rss_summary"]
+    article["body_source"] = "RSS概要"
+    return article
+
+
+def fetch_article_bodies(articles, enabled=True):
+    if not enabled:
+        for article in articles:
+            article["article_text"] = article["rss_summary"]
+            article["body_source"] = "RSS概要"
+        return articles
+
+    print("記事本文の取得開始")
+    results = []
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = [
+            pool.submit(fetch_article_text, article)
+            for article in articles
+        ]
+
+        for future in as_completed(futures):
+            try:
+                results.append(future.result())
+            except Exception as exc:
+                print(
+                    f"本文取得エラー: {type(exc).__name__}: {exc}"
+                )
+
+    by_link = {
+        article["link"]: article
+        for article in results
+    }
+
+    output = [
+        by_link.get(article["link"], article)
+        for article in articles
+    ]
+
+    full_count = sum(
+        1 for article in output
+        if article.get("body_source") == "本文"
+    )
+
+    print(f"本文取得成功: {full_count}/{len(output)}件")
+    return output
+
+
+# ------------------------------------------------------------
 # AIによる選定・要約
-# ============================================================
+# ------------------------------------------------------------
 
-def extract_json(text):
+def parse_json_output(text):
     text = text.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
@@ -350,55 +387,24 @@ def extract_json(text):
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-
-        if start >= 0 and end > start:
-            return json.loads(text[start:end + 1])
-
+        match = re.search(r"\{.*\}", text, flags=re.S)
+        if match:
+            return json.loads(match.group(0))
         raise
 
 
-def diversify_selected_news(news):
-    """選定済みニュースをカテゴリごとに交互に並べる。"""
-    grouped = {}
-    order = []
+def shorten_title(title, max_length=70):
+    title = clean_text(title)
+    title = re.sub(r"\s[-|｜]\s[^-|｜]{2,40}$", "", title)
+    title = re.sub(r"\s+", " ", title).strip()
 
-    for item in news:
-        category = item.get("category", "その他")
+    if len(title) <= max_length:
+        return title
 
-        if category not in grouped:
-            grouped[category] = []
-            order.append(category)
-
-        grouped[category].append(item)
-
-    result = []
-    depth = 0
-
-    while True:
-        added = False
-
-        for category in order:
-            if depth < len(grouped[category]):
-                result.append(grouped[category][depth])
-                added = True
-
-        if not added:
-            break
-
-        depth += 1
-
-    return result
+    return title[:max_length - 1].rstrip() + "…"
 
 
 def summarize_news(articles, config):
-    if not articles:
-        return {
-            "news": [],
-            "today_points": "本日は条件に合うニュースを取得できませんでした。",
-        }
-
     try:
         max_news = int(
             config["settings"]["Discordに掲載するニュース数"]
@@ -406,229 +412,237 @@ def summarize_news(articles, config):
     except ValueError:
         max_news = 15
 
+    if not articles:
+        raise RuntimeError(
+            "48時間以内のニュースがありません。"
+        )
+
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    article_text = []
+    candidates = []
 
-    for i, article in enumerate(articles, start=1):
-        article_text.append({
-            "id": i,
+    for idx, article in enumerate(articles, start=1):
+        candidates.append({
+            "id": idx,
             "category": article["category"],
             "title": article["title"],
-            "summary": article["summary"][:500],
             "published": article["published"],
+            "body_source": article["body_source"],
+            "article_text": article["article_text"][:7000],
             "url": article["link"],
-            "priority_score": article["priority_score"],
-            "category_focus": article["focus"],
         })
 
     prompt = f"""
 あなたは日本語のニュース編集者です。
-入力されたRSS記事だけを根拠に、興味の幅を広げる毎朝のニュース便を編集してください。重要度ランキングではなく、分野の幅と本文だけで理解できる説明を重視します。
+以下の記事候補から、幅広い分野のニュースを最大{max_news}件選んでください。
 
-設定ファイルに記載された方針:
-{config["text"][:10000]}
+設定:
+{config["text"][:7000]}
 
-候補記事:
-{json.dumps(article_text, ensure_ascii=False)}
+記事候補:
+{json.dumps(candidates, ensure_ascii=False)}
 
-要件:
-- 原則{max_news}件を選ぶ。候補が足りなければ無理に作らない。
-- できるだけ多くのカテゴリを含め、同じカテゴリは原則2件までにする。
-- スポーツに偏らず、政治、国際、経済、IT、科学、社会、ゲーム、音楽、漫画、ディズニー、教養などを幅広く検討する。
-- 毎日の大ニュースに加え、知らなかった分野を学べる話題も入れる。
-- 重要度の点数付けやランキングはしない。背景を知る価値、新規性、視野が広がるかを基準に選ぶ。
-- 類似記事を重複して選ばない。
-- 入力にない事実を作らない。裏付けが弱い場合は断定を避ける。
-- summaryは3〜5文。何が起きたか、背景、なぜ注目されるか、今後の焦点を、記事にある情報の範囲で具体的に説明する。本文だけで内容がわかるようにする。
-- 専門用語や制度名は初見向けに短く説明する。
-- why_it_mattersは出力JSONとの互換性のため残すが、summary本文に自然に含め、空文字でもよい。
-- urlは候補記事のURLをそのまま使い、変更しない。
-- idは候補記事のidを指定する。
-- categoryは候補記事のカテゴリを使用する。
-- 分野がなるべく交互になるように並べる。
-- JSON以外の文章やMarkdownを出力しない。
+必須ルール:
+- スポーツだけに偏らず、候補にある複数分野を幅広く選ぶ。
+- 同一カテゴリは原則2件までにする。ただし候補が不足する場合は柔軟に判断する。
+- 重要度ランキングや点数付けはしない。
+- 本文を取得できている記事は、本文に書かれた具体的な情報を読んで要約する。
+- 「話題になっている」「注目されている」だけの抽象的な要約は禁止。
+- タイトルは短く具体的に編集する。配信元名などの余計な文言は削除する。
+- summaryは必ず箇条書き3行にする。
+- 各行は「・」から始める。各行は原則1文で、具体的な事実を含める。
+- 1行目は主な出来事や結果。
+- 2行目は具体的な数字、順位、背景、関係者の発言など、記事にある詳細。
+- 3行目はそのニュースの意味、影響、今後の焦点。
+- ただし記事に書かれていない情報を推測で補わない。材料がなければ分かる範囲で簡潔にする。
+- 記事本文が取れずRSS概要しかない場合、概要にない詳細を作らない。
+- URLは入力されたものをそのまま使う。
+- idも入力された番号をそのまま使う。
+- JSON以外の文章は出力しない。
 
 出力形式:
 {{
   "news": [
     {{
       "id": 1,
-      "category": "国際情勢",
-      "title": "ニュース見出し",
-      "summary": "背景まで含めて本文だけで理解できる3〜5文の説明",
-      "why_it_matters": "",
-      "url": "候補記事のURL"
+      "title": "短く具体的な見出し",
+      "summary": "・1行目\\n・2行目\\n・3行目",
+      "url": "入力URL"
     }}
   ],
-  "today_points": "今日のニュース全体から押さえるべき点を2〜3文でまとめる"
+  "today_points": "今日のニュース全体を横断する短いまとめ。1〜2文。"
 }}
 """
 
-    print("AI要約・選定開始")
+    print("AIによる本文要約・選定開始")
 
     response = client.responses.create(
         model=OPENAI_MODEL,
         store=False,
-        max_output_tokens=6000,
+        max_output_tokens=9000,
         input=prompt,
     )
 
-    output_text = response.output_text.strip()
-
-    if not output_text:
-        raise RuntimeError("AIから空の要約が返されました。")
+    raw = response.output_text or ""
 
     try:
-        result = extract_json(output_text)
-
-        if (
-            not isinstance(result, dict)
-            or not isinstance(result.get("news"), list)
+        result = parse_json_output(raw)
+        if not isinstance(result, dict) or not isinstance(
+            result.get("news"), list
         ):
-            raise ValueError(
-                "AI出力のJSON形式が想定と異なります。"
-            )
-
-        valid_by_id = {
-            i: article
-            for i, article in enumerate(articles, start=1)
-        }
-
-        clean_news = []
-
-        for item in result["news"]:
-            try:
-                article_id = int(item.get("id"))
-            except (ValueError, TypeError):
-                continue
-
-            source = valid_by_id.get(article_id)
-
-            if not source:
-                continue
-
-            # URLはAIの返却値を信用せず、候補記事から採用する
-            summary = str(
-                item.get("summary", "")
-            ).strip()[:2500]
-
-            why = str(
-                item.get("why_it_matters", "")
-            ).strip()[:800]
-
-            if why and why not in summary:
-                summary = (
-                    summary
-                    + "\n\n**背景・注目点**\n"
-                    + why
-                ).strip()
-
-            clean_news.append({
-                "category": source["category"],
-                "title": str(
-                    item.get("title") or source["title"]
-                )[:256],
-                "summary": summary,
-                "url": source["link"],
-            })
-
-        # AIの返却順を尊重しつつ、カテゴリが続きすぎないよう交互に並べる。
-        clean_news = diversify_selected_news(
-            clean_news
-        )[:max_news]
-
-        print(f"AI選定完了: {len(clean_news)}件")
-
-        return {
-            "news": clean_news,
-            "today_points": str(
-                result.get("today_points", "")
-            ).strip()[:1500],
-        }
-
-    except (json.JSONDecodeError, ValueError, TypeError) as e:
-        print(f"AI出力の解析に失敗: {e}")
-        print(
-            "フォールバック: カテゴリの偏りを抑えてRSS記事を掲載します。"
+            raise ValueError("news配列がありません。")
+    except (json.JSONDecodeError, ValueError) as exc:
+        print(f"AI出力解析エラー: {exc}")
+        print("AI出力の先頭:", raw[:500])
+        raise RuntimeError(
+            "AIの出力を解析できませんでした。"
         )
 
-        fallback = []
+    valid_articles = {
+        idx: article
+        for idx, article in enumerate(articles, start=1)
+    }
 
-        for article in articles[:max_news]:
-            fallback.append({
-                "category": article["category"],
-                "title": article["title"][:256],
-                "summary": (
-                    article["summary"][:1500]
-                    or "RSSに概要情報がありません。元記事で詳細を確認してください。"
-                ),
-                "url": article["link"],
-            })
-
-        return {
-            "news": diversify_selected_news(
-                fallback
-            )[:max_news],
-            "today_points": (
-                "AI要約に失敗したため、RSSの見出しと概要を表示しています。"
-                "内容の詳細は各記事で確認してください。"
-            ),
-        }
-
-
-# ============================================================
-# Discord Embed投稿
-# ============================================================
-
-def build_embeds(result):
-    today = datetime.now(JST).strftime("%Y年%m月%d日")
-
-    embeds = [{
-        "title": "📰 今日のニュース便",
-        "description": (
-            f"{today}\n"
-            f"掲載ニュース: {len(result['news'])}件\n"
-            "幅広い分野から、背景までわかるニュースをお届けします。"
-        ),
-        "color": 0x5865F2,
-    }]
+    selected = []
+    seen_ids = set()
 
     for item in result["news"]:
-        summary = (
-            item.get("summary", "").strip()
-            or "概要情報が取得できませんでした。"
+        try:
+            article_id = int(item.get("id"))
+        except (TypeError, ValueError):
+            continue
+
+        source = valid_articles.get(article_id)
+
+        if not source or article_id in seen_ids:
+            continue
+
+        seen_ids.add(article_id)
+
+        title = shorten_title(
+            item.get("title") or source["title"]
         )
 
+        summary = str(item.get("summary", "")).strip()
+
+        # 3行の箇条書き形式に整える
+        lines = [
+            line.strip().lstrip("・-• ").strip()
+            for line in summary.splitlines()
+            if line.strip()
+        ]
+        lines = lines[:3]
+
+        while len(lines) < 3:
+            # 内容を捏造して行数を埋めない
+            lines.append("詳細は記事本文で確認できます。")
+
+        summary = "\n".join(
+            f"・{line}" for line in lines
+        )
+
+        selected.append({
+            "category": source["category"],
+            "title": title,
+            "summary": summary,
+            "url": source["link"],
+        })
+
+        if len(selected) >= max_news:
+            break
+
+    if not selected:
+        raise RuntimeError(
+            "AIが有効なニュースを返しませんでした。"
+        )
+
+    return {
+        "news": selected,
+        "today_points": str(
+            result.get("today_points", "")
+        ).strip()[:1000],
+    }
+
+
+# ------------------------------------------------------------
+# Discord表示
+# ------------------------------------------------------------
+
+CATEGORY_ICONS = {
+    "プロ野球・高校野球": "⚾",
+    "MLB・海外野球": "⚾",
+    "サッカー": "⚽",
+    "バスケットボール・バレーボール": "🏀",
+    "その他のスポーツ": "🏅",
+    "日本政治・行政": "🏛️",
+    "国際情勢": "🌍",
+    "経済・ビジネス": "💹",
+    "IT・AI・セキュリティ": "💻",
+    "科学・研究・新発見": "🔬",
+    "社会・暮らし・制度": "🏙️",
+    "ゲーム・VTuber": "🎮",
+    "音楽・漫画・ディズニー": "🎵",
+    "世界を知る・教養トピック": "💡",
+}
+
+CATEGORY_COLORS = {
+    "プロ野球・高校野球": 0x397D76,
+    "MLB・海外野球": 0x397D76,
+    "サッカー": 0x397D76,
+    "バスケットボール・バレーボール": 0x397D76,
+    "その他のスポーツ": 0x397D76,
+    "日本政治・行政": 0xB85C5C,
+    "国際情勢": 0x6A78B8,
+    "経済・ビジネス": 0xB88745,
+    "IT・AI・セキュリティ": 0x397D76,
+    "科学・研究・新発見": 0x6A8F55,
+    "社会・暮らし・制度": 0x8A6FB0,
+    "ゲーム・VTuber": 0x9A63A8,
+    "音楽・漫画・ディズニー": 0xC16B8A,
+    "世界を知る・教養トピック": 0x3C8D73,
+}
+
+
+def build_embeds(result):
+    today = datetime.now(JST).strftime("%m/%d")
+    news = result["news"]
+
+    embeds = [{
+        "title": f"🗞️ 朝のニュース便　{today}",
+        "description": (
+            f"今日の{len(news)}トピック\n"
+            "幅広い分野から、要点を3行でお届けします。"
+        ),
+        "color": 0x3478A8,
+    }]
+
+    for index, item in enumerate(news, start=1):
+        icon = CATEGORY_ICONS.get(
+            item["category"], "📰"
+        )
+
+        title = shorten_title(item["title"], 75)
         description = (
-            f"{summary}\n\n"
-            f"[続きはこちら]({item['url']})"
+            f"{item['summary']}\n\n"
+            f"[続きはこちら ↗]({item['url']})"
         )
-
-        if len(description) > 4000:
-            description = (
-                description[:3950]
-                + "…\n\n[続きはこちら]({})".format(
-                    item["url"]
-                )
-            )
 
         embeds.append({
-            "title": item["title"][:256],
-            "description": description,
-            "color": 0x5865F2,
-            "fields": [{
-                "name": "分野",
-                "value": item["category"][:1024],
-                "inline": True,
-            }],
+            "title": f"{icon} {title}",
+            "description": description[:4000],
+            "color": CATEGORY_COLORS.get(
+                item["category"], 0x5865F2
+            ),
+            "footer": {
+                "text": f"{index:02d} / {len(news)}"
+            },
         })
 
     if result.get("today_points"):
         embeds.append({
-            "title": "🌱 今日の視野を広げるポイント",
-            "description": result["today_points"][:4000],
-            "color": 0x2ECC71,
+            "title": "🌱 今日の横断メモ",
+            "description": result["today_points"][:1000],
+            "color": 0x3C8D73,
         })
 
     return embeds
@@ -637,16 +651,15 @@ def build_embeds(result):
 def post_to_discord(result):
     embeds = build_embeds(result)
 
-    # Discord Webhookは1リクエストあたり最大10 embeds。
-    # ニュース数が多い場合は10件ずつ送る。
+    # Discord Webhookは1回につき最大10 embeds
     chunks = [
         embeds[i:i + 10]
         for i in range(0, len(embeds), 10)
     ]
 
-    for index, embed_chunk in enumerate(chunks, start=1):
+    for index, chunk in enumerate(chunks, start=1):
         payload = {
-            "embeds": embed_chunk,
+            "embeds": chunk,
             "allowed_mentions": {"parse": []},
         }
 
@@ -665,16 +678,15 @@ def post_to_discord(result):
 
         try:
             with urllib.request.urlopen(
-                request,
-                timeout=30,
+                request, timeout=30
             ) as response:
                 print(
                     f"Discord投稿成功: HTTP {response.status} "
                     f"({index}/{len(chunks)})"
                 )
 
-        except urllib.error.HTTPError as e:
-            print(f"Discord HTTP error: {e.code}")
+        except urllib.error.HTTPError as exc:
+            print(f"Discord HTTP error: {exc.code}")
 
             for key in (
                 "Server",
@@ -682,32 +694,25 @@ def post_to_discord(result):
                 "CF-Ray",
                 "Retry-After",
             ):
-                value = e.headers.get(key)
-
-                if value:
-                    print(f"{key}: {value}")
+                if exc.headers.get(key):
+                    print(f"{key}: {exc.headers.get(key)}")
 
             try:
-                error_body = e.read().decode(
-                    "utf-8",
-                    errors="replace",
-                )
                 print(
-                    f"Discord error response: {error_body[:2000]}"
+                    "Discord error response:",
+                    exc.read().decode(
+                        "utf-8", errors="replace"
+                    )[:1500],
                 )
             except Exception:
-                print("エラー本文を取得できませんでした。")
+                pass
 
             raise
 
-        except urllib.error.URLError as e:
-            print(f"Discord接続エラー: {e.reason}")
-            raise
 
-
-# ============================================================
+# ------------------------------------------------------------
 # メイン処理
-# ============================================================
+# ------------------------------------------------------------
 
 def main():
     config = load_config()
@@ -724,9 +729,21 @@ def main():
 
     if not articles:
         raise RuntimeError(
-            "ニュースを取得できませんでした。"
-            "news.mdの検索語やRSSの状態を確認してください。"
+            "48時間以内の記事を取得できませんでした。"
+            "news.mdの検索語やRSSの公開日時を確認してください。"
         )
+
+    enabled = (
+        config["settings"]
+        .get("記事本文の取得", "true")
+        .lower()
+        not in ("false", "no", "0")
+    )
+
+    articles = fetch_article_bodies(
+        articles,
+        enabled=enabled,
+    )
 
     result = summarize_news(articles, config)
     post_to_discord(result)
