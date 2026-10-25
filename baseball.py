@@ -18,7 +18,7 @@ MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 RSS_URL = "https://news.google.com/rss/search"
 NPB_URL = "https://npb.jp/scores/"
 MLB_API = "https://statsapi.mlb.com/api/v1"
-USER_AGENT = "Mozilla/5.0 (compatible; DailyBaseballBriefing/1.0)"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36"
 
 
 def clean(value):
@@ -27,9 +27,17 @@ def clean(value):
     return re.sub(r"\s+", " ", value).strip()
 
 
-def http_get(url):
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=25) as response:
+def http_get(url, timeout=12):
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/json,application/xhtml+xml,*/*",
+            "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
+            "Referer": "https://www.google.com/",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.read()
 
 
@@ -101,7 +109,7 @@ JSONのみで返す。summaryは改行を含む3行の文字列にする。形�
         lines = [clean(line).lstrip("・-• ").strip() for line in str(item.get("summary", "")).splitlines() if clean(line)]
         lines = lines[:3]
         while len(lines) < 3:
-            lines.append("詳細は記事本文で確認できます。")
+            lines.append("記事本文で詳細を確認できます。" if len(lines) == 2 else "記事の詳細を確認中です。")
         news.append({
             "category": clean(item.get("category", "野球")),
             "title": clean(item.get("title", ""))[:240],
@@ -147,11 +155,21 @@ class TableParser(HTMLParser):
             self.in_table = False
 
 
+_npb_page_cache = None
+
+def get_npb_page():
+    """Fetch the NPB official page once per run; fail quickly if the host is unreachable."""
+    global _npb_page_cache
+    if _npb_page_cache is None:
+        _npb_page_cache = http_get(NPB_URL, timeout=8).decode("utf-8", errors="replace")
+    return _npb_page_cache
+
+
 def get_npb_recent_results():
     """Extract recent completed score rows from the NPB official schedule page when its table is available."""
     try:
         parser = TableParser()
-        parser.feed(http_get(NPB_URL).decode("utf-8", errors="replace"))
+        parser.feed(get_npb_page())
         teams = ("阪神", "巨人", "DeNA", "横浜", "広島", "ヤクルト", "中日",
                  "ソフトバンク", "西武", "日本ハム", "オリックス", "ロッテ", "楽天")
         results = []
@@ -174,7 +192,7 @@ def get_npb_standings():
     """Parse standings tables directly from NPB's official Japanese standings page."""
     try:
         parser = TableParser()
-        parser.feed(http_get(NPB_URL).decode("utf-8", errors="replace"))
+        parser.feed(get_npb_page())
         found = []
         for table in parser.tables:
             header_index = None
