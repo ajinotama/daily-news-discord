@@ -80,13 +80,13 @@ def summarize(articles):
 各ニュースについて:
 - title: 短い見出し
 - summary: 事実を2文程度で説明。選手・チーム・数字・背景など、候補から確認できる具体情報を優先
-- conversation_seed: 野球に詳しくない人とも話せる、自然な雑談のきっかけを1文
+- summary: 必ず3行。各行は「・」から始め、1行目は出来事、2行目は数字や背景、3行目は意味や今後の焦点。記事にない情報を作らない
 - url: 入力URLをそのまま使用
 NPBとMLBの両方に良い候補があれば、できるだけ両方を扱う。
 候補:
 {json.dumps(articles, ensure_ascii=False)}
 出力形式:
-{{"news":[{{"category":"NPB・プロ野球またはMLB","title":"見出し","summary":"要約","conversation_seed":"雑談の種","url":"URL"}}]}}
+{{"news":[{{"category":"NPB・プロ野球またはMLB","title":"見出し","summary":"・出来事\\n・数字や背景\\n・意味や焦点","url":"URL"}}]}}
 """
     response = client.responses.create(
         model=MODEL,
@@ -106,8 +106,7 @@ NPBとMLBの両方に良い候補があれば、できるだけ両方を扱う�
         news.append({
             "category": item.get("category", "野球"),
             "title": clean(item.get("title", ""))[:240],
-            "summary": clean(item.get("summary", ""))[:1500],
-            "conversation_seed": clean(item.get("conversation_seed", ""))[:500],
+            "summary": "\\n".join("・" + line.strip().lstrip("・-• ").strip() for line in [x for x in str(item.get("summary", "")).splitlines() if x.strip()][:3]) or "・詳細は記事本文で確認できます。\\n・詳細は記事本文で確認できます。\\n・詳細は記事本文で確認できます。",
             "url": url,
         })
     if not news:
