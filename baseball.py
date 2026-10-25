@@ -4,6 +4,7 @@ import html
 import re
 import urllib.parse
 import urllib.request
+from html.parser import HTMLParser
 from datetime import datetime, timezone, timedelta
 from calendar import timegm
 
@@ -15,6 +16,8 @@ API_KEY = os.environ["OPENAI_API_KEY"]
 WEBHOOK_URL = os.environ["DISCORD_BASEBALL_WEBHOOK_URL"]
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 RSS_URL = "https://news.google.com/rss/search"
+NPB_STANDINGS_URL = "https://npb.jp/scores/"
+MLB_STANDINGS_URL = "https://statsapi.mlb.com/api/v1/standings"
 USER_AGENT = "Mozilla/5.0 (compatible; DailyBaseballBriefing/1.0)"
 
 
@@ -114,6 +117,54 @@ NPBとMLBの両方に良い候補があれば、できるだけ両方を扱う�
     return news
 
 
+def get_standings_embeds():
+    embeds = []
+    req = urllib.request.Request(NPB_STANDINGS_URL, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=25) as response:
+            page = response.read().decode("utf-8", errors="replace")
+        # NPBの公式ページへのリンクは、取得失敗時にも必ず案内する
+        embeds.append({
+            "title": "📊 NPB セ・パ順位表",
+            "description": f"[NPB公式の勝敗表・順位表を見る ↗]({NPB_STANDINGS_URL})",
+            "url": NPB_STANDINGS_URL,
+            "color": 0x397D76,
+            "footer": {"text": "出典: NPB公式"},
+        })
+        params = urllib.parse.urlencode({"leagueId": "103,104", "season": datetime.now(JST).year, "standingsTypes": "regularSeason"})
+        url = MLB_STANDINGS_URL + "?" + params
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=25) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        for record in data.get("records", []):
+            division = record.get("division", {}).get("name", "Division")
+            lines = []
+            for i, team in enumerate(record.get("teamRecords", []), 1):
+                name = team.get("team", {}).get("name", "Unknown")
+                wins = team.get("wins", 0)
+                losses = team.get("losses", 0)
+                pct = team.get("winningPercentage", "-")
+                gb = team.get("gamesBack", "-")
+                lines.append(f"{i}. **{name}**　{wins}-{losses}　勝率 {pct}　差 {gb}")
+            if lines:
+                embeds.append({
+                    "title": "🇺🇸 MLB " + division,
+                    "description": "\\n".join(lines)[:4000],
+                    "url": "https://www.mlb.com/standings",
+                    "color": 0x2463A6,
+                    "footer": {"text": "出典: MLB Stats API / レギュラーシーズン"},
+                })
+    except Exception as exc:
+        print(f"順位表取得失敗: {type(exc).__name__}: {exc}")
+        if not embeds:
+            embeds.append({
+                "title": "📊 順位表",
+                "description": "[NPB公式順位表 ↗](https://npb.jp/scores/) ・ [MLB公式順位表 ↗](https://www.mlb.com/standings)",
+                "color": 0x397D76,
+            })
+    return embeds
+
+
 def post(news):
     today = datetime.now(JST).strftime("%Y/%m/%d")
     embeds = [{
@@ -132,7 +183,8 @@ def post(news):
             "color": 0x397D76 if "NPB" in item["category"] or "プロ野球" in item["category"] else 0x2463A6,
             "footer": {"text": f"{i} / {len(news)}"},
         })
-    payload = {"embeds": embeds, "allowed_mentions": {"parse": []}}
+    embeds.extend(get_standings_embeds())
+    payload = {"embeds": embeds[:10], "allowed_mentions": {"parse": []}}
     request = urllib.request.Request(
         WEBHOOK_URL,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
