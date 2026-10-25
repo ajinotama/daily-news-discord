@@ -148,6 +148,29 @@ class TableParser(HTMLParser):
             self.in_table = False
 
 
+def get_npb_recent_results():
+    """Extract recent completed score rows from the NPB official schedule page when its table is available."""
+    try:
+        parser = TableParser()
+        parser.feed(http_get(NPB_URL).decode("utf-8", errors="replace"))
+        teams = ("阪神", "巨人", "DeNA", "横浜", "広島", "ヤクルト", "中日",
+                 "ソフトバンク", "西武", "日本ハム", "オリックス", "ロッテ", "楽天")
+        results = []
+        for table in parser.tables:
+            for row in table:
+                joined = " ".join(row)
+                found_teams = [team for team in teams if team in joined]
+                numbers = [cell for cell in row if re.fullmatch(r"\d{1,2}", cell.strip())]
+                if len(set(found_teams)) >= 2 and len(numbers) >= 2:
+                    line = "　".join(cell for cell in row if cell)
+                    if line not in results:
+                        results.append(line)
+        return results[-12:]
+    except Exception as exc:
+        print(f"NPB試合結果取得失敗: {type(exc).__name__}: {exc}")
+        return []
+
+
 def get_npb_standings():
     """Parse standings tables directly from NPB's official Japanese standings page."""
     try:
@@ -294,25 +317,41 @@ def standings_embeds():
 
 
 def results_embeds():
+    embeds = []
+    npb = get_npb_recent_results()
+    if npb:
+        embeds.append({
+            "title": "⚾ NPB直近の試合結果",
+            "description": "\n".join(npb)[:4000],
+            "url": NPB_URL,
+            "color": 0x397D76,
+            "footer": {"text": "出典: NPB公式日程・結果。公式ページから読み取れた行のみ"}
+        })
+    else:
+        embeds.append({
+            "title": "⚾ NPB直近の試合結果",
+            "description": f"[NPB公式の日程・結果を見る ↗]({NPB_URL})\nスコアの自動取得に失敗したため、数値は表示していません。",
+            "url": NPB_URL,
+            "color": 0x397D76
+        })
+
     games = get_mlb_recent_results()
-    if not games:
-        return [{
-            "title": "⚾ MLB直近の試合結果",
-            "description": "[MLB公式スコアを見る ↗](https://www.mlb.com/scores)\n直近の終了試合を取得できませんでした。",
-            "url": "https://www.mlb.com/scores",
-            "color": 0x2463A6
-        }]
-    lines = [
-        f"**{g['date']}**　{g['away']} {g['away_score']} - {g['home_score']} {g['home']}"
-        for g in games
-    ]
-    return [{
-        "title": "⚾ MLB直近の試合結果",
-        "description": "\n".join(lines)[:4000],
+    if games:
+        lines = [
+            f"**{g['date']}**　{g['away']} {g['away_score']} - {g['home_score']} {g['home']}"
+            for g in games
+        ]
+        description = "\n".join(lines)[:4000]
+    else:
+        description = "[MLB公式スコアを見る ↗](https://www.mlb.com/scores)\n直近の終了試合を取得できませんでした。"
+    embeds.append({
+        "title": "🇺🇸 MLB直近の試合結果",
+        "description": description,
         "url": "https://www.mlb.com/scores",
         "color": 0x2463A6,
         "footer": {"text": "出典: MLB Stats API。直近2日分の終了試合"}
-    }]
+    })
+    return embeds
 
 
 def post(news):
