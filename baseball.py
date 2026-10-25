@@ -84,7 +84,7 @@ def summarize(articles):
 2行目: 記事で確認できる数字や背景
 3行目: 意味または今後の焦点。推測を事実のように書かない
 urlは入力URLをそのまま使う。
-JSONのみで返す。summaryは改行を含む3行の文字列にする。形式: {"news":[{"category":"NPB・プロ野球またはMLB","title":"見出し","summary":"・出来事 / ・数字や背景 / ・意味や焦点","url":"入力URL"}]}
+JSONのみで返す。summaryは改行を含む3行の文字列にする。形式: {{"news":[{{"category":"NPB・プロ野球またはMLB","title":"見出し","summary":"・出来事 / ・数字や背景 / ・意味や焦点","url":"入力URL"}}]}}
 候補:
 {json.dumps(articles, ensure_ascii=False)}
 """
