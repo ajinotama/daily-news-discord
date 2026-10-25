@@ -1,10 +1,8 @@
 name: Daily News to Discord
 on:
   schedule:
-    # 毎朝7:00（日本時間）に実行
-    # GitHub ActionsのcronはUTC基準
+    # 毎朝7:00（日本時間）に実行（UTC基準）
     - cron: '0 22 * * *'
-  # Actions画面から手動実行できるようにする
   workflow_dispatch:
 jobs:
   daily-news:
@@ -16,10 +14,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install feedparser openai
+          pip install -r requirements.txt
       - name: Run news briefing
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
