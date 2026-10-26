@@ -326,6 +326,13 @@ def postseason_embeds():
              "footer":{"text":"未取得のスコアやシリーズ勝数は推測で表示しません"}}]
 
 
+def ascii_table(headers, rows):
+    lines = ["| " + " | ".join(str(x) for x in headers) + " |", "| " + " | ".join(["---"] * len(headers)) + " |"]
+    for row in rows:
+        lines.append("| " + " | ".join(str(x) for x in row) + " |")
+    return "\n".join(lines)
+
+
 def standings_comment(league, data):
     try:
         client = OpenAI(api_key=API_KEY)
