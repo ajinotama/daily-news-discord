@@ -303,35 +303,54 @@ def standings_comment(league, data):
         return "首位と追う球団の差に注目しましょう。"
 
 
+def ascii_table(headers, rows):
+    """Render a fixed-width table for Discord using table2ascii."""
+    try:
+        from table2ascii import table2ascii
+        rendered = table2ascii(header=headers, body=[[str(cell) for cell in row] for row in rows])
+        fence = chr(96) * 3
+        return f"{fence}\n{rendered}\n{fence}"
+    except Exception as exc:
+        print(f"table2ascii変換失敗: {type(exc).__name__}: {exc}")
+        fence = chr(96) * 3
+        return f"{fence}\n" + " | ".join(headers) + "\n" + "\n".join(" | ".join(map(str, row)) for row in rows) + f"\n{fence}"
+
+
 def standings_embeds():
     embeds = []
     npb = get_npb_standings()
     if npb:
-        lines = ["**セ・リーグ**", "順位 | 球団 | 試合 | 勝 | 敗 | 分 | 勝率 | 差"]
-        for rank, row in enumerate(npb[0], 1):
-            lines.append(f"{rank} | {' | '.join(row[:7])}")
-        lines += ["", "**パ・リーグ**", "順位 | 球団 | 試合 | 勝 | 敗 | 分 | 勝率 | 差"]
-        for rank, row in enumerate(npb[1], 1):
-            lines.append(f"{rank} | {' | '.join(row[:7])}")
-        lines += ["", "**項目：** 試合=消化試合、勝=勝利、敗=敗戦、分=引き分け、勝率=勝数÷(勝数+敗数)、差=首位との差",
-                  "**AIコメント：** " + standings_comment("NPB", npb)]
-        embeds.append({"title":"📊 NPB順位表（全12球団）","description":"\\n".join(lines)[:4000],"url":NPB_URL,"color":0x397D76,"footer":{"text":"出典: Yahoo! JAPAN プロ野球順位表"}})
+        npb_lines = []
+        for league_name, teams in zip(["セ・リーグ", "パ・リーグ"], npb):
+            rows = []
+            for rank, row in enumerate(teams, 1):
+                values = list(row)
+                while len(values) < 7:
+                    values.append("-")
+                rows.append([rank, values[0], values[1], values[2], values[3], values[4], values[5], values[6]])
+            npb_lines.append(f"**{league_name}**\n" + ascii_table(["順", "球団", "試合", "勝", "敗", "分", "勝率", "差"], rows))
+        npb_lines += ["**項目：** 試合=消化試合、勝=勝利、敗=敗戦、分=引き分け、勝率=勝数÷(勝数+敗数)、差=首位との差",
+                      "**AIコメント：** " + standings_comment("NPB", npb)]
+        embeds.append({"title":"📊 NPB順位表（全12球団）","description":"\n\n".join(npb_lines)[:4000],"url":NPB_URL,"color":0x397D76,"footer":{"text":"出典: Yahoo! JAPAN プロ野球順位表"}})
     else:
-        embeds.append({"title":"📊 NPB順位表","description":f"[順位表を見る ↗]({NPB_URL})\\n自動取得に失敗しました。","url":NPB_URL,"color":0x397D76})
+        embeds.append({"title":"📊 NPB順位表","description":f"[順位表を見る ↗]({NPB_URL})\n自動取得に失敗しました。","url":NPB_URL,"color":0x397D76})
+
     try:
         mlb = get_mlb_standings()
-        lines = []
-        for division, rows in mlb:
-            lines += [f"**{division}**", "順位 | 球団 | 勝-敗 | 勝率 | 首位との差"]
-            for rank, row in enumerate(rows, 1):
-                lines.append(f"{rank} | {row['name']} | {row['wins']}-{row['losses']} | {row['pct']} | {row['gb']}")
-            lines.append("")
-        lines += ["**項目：** 勝-敗=勝利数-敗戦数、勝率=勝数÷試合数、首位との差=地区首位からのゲーム差",
-                  "**AIコメント：** " + standings_comment("MLB", mlb)]
-        embeds.append({"title":"🇺🇸 MLB順位表（全30球団）","description":"\\n".join(lines)[:4000],"url":MLB_STANDINGS_URL,"color":0x2463A6,"footer":{"text":"AL=アメリカン・リーグ、NL=ナショナル・リーグ。各リーグに東・中・西の3地区"}})
+        division_lines = []
+        for division, teams in mlb:
+            rows = [[rank, team["name"], f'{team["wins"]}-{team["losses"]}', team["pct"], team["gb"]]
+                    for rank, team in enumerate(teams, 1)]
+            division_lines.append(f"**{division}**\n" + ascii_table(["順", "球団", "勝-敗", "勝率", "差"], rows))
+        for start, league_name in [(0, "アメリカン・リーグ（AL）"), (3, "ナショナル・リーグ（NL）")]:
+            description = "\n\n".join(division_lines[start:start+3])
+            description += "\n\n**項目：** 勝-敗=勝利数-敗戦数、勝率=勝数÷試合数、差=地区首位からのゲーム差"
+            description += "\n**AIコメント：** " + standings_comment("MLB", mlb[start:start+3])
+            embeds.append({"title":f"🇺🇸 MLB順位表｜{league_name}","description":description[:4000],"url":MLB_STANDINGS_URL,"color":0x2463A6,
+                           "footer":{"text":"各リーグは東・中・西の3地区。順=順位、差=地区首位からのゲーム差"}})
     except Exception as exc:
         print(f"MLB順位表取得失敗: {type(exc).__name__}: {exc}")
-        embeds.append({"title":"🇺🇸 MLB順位表","description":f"[MLB順位表を見る ↗]({MLB_STANDINGS_URL})\\nHTMLからの取得に失敗しました。","url":MLB_STANDINGS_URL,"color":0x2463A6})
+        embeds.append({"title":"🇺🇸 MLB順位表","description":f"[MLB順位表を見る ↗]({MLB_STANDINGS_URL})\nHTMLからの取得に失敗しました。","url":MLB_STANDINGS_URL,"color":0x2463A6})
     return embeds
 
 
