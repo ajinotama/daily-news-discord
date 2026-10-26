@@ -157,21 +157,20 @@ class TableParser(HTMLParser):
             self.in_table = False
 
 
-_npb_page_cache = None
+_npb_page_cache = {}
 
-def get_npb_page():
-    """Fetch the NPB official page once per run; fail quickly if the host is unreachable."""
-    global _npb_page_cache
-    if _npb_page_cache is None:
-        _npb_page_cache = http_get(NPB_URL, timeout=8).decode("utf-8", errors="replace")
-    return _npb_page_cache
+def get_npb_page(url=NPB_URL):
+    """Fetch and cache each public standings/schedule page once per run."""
+    if url not in _npb_page_cache:
+        _npb_page_cache[url] = http_get(url, timeout=12).decode("utf-8", errors="replace")
+    return _npb_page_cache[url]
 
 
 def get_npb_recent_results():
     """Extract recent completed score rows from the NPB official schedule page when its table is available."""
     try:
         parser = TableParser()
-        parser.feed(get_npb_page())
+        parser.feed(get_npb_page(NPB_SCORES_URL))
         teams = ("阪神", "巨人", "DeNA", "横浜", "広島", "ヤクルト", "中日",
                  "ソフトバンク", "西武", "日本ハム", "オリックス", "ロッテ", "楽天")
         results = []
@@ -388,8 +387,8 @@ def post(news):
 
     for i, item in enumerate(news, 1):
         sections.append(
-            f"\n⚾ **ニュース {i}/{len(news)}｜{item['title']}**\n"
-            f"{item['summary']}\n[記事を読む ↗]({item['url']})"
+            f"\n━━━━━━━━━━━━━━━━\n⚾ **ニュース {i}/{len(news)}｜[{item['title']}]({item['url']})**\n"
+            f"{item['summary']}"
         )
 
     # Existing data collectors provide the titles, descriptions, source links and footers.
@@ -398,7 +397,7 @@ def post(news):
         description = embed.get("description", "").strip()
         footer = embed.get("footer", {}).get("text", "").strip()
         url = embed.get("url", "").strip()
-        section = f"\n\n**{title}**"
+        section = f"\n\n━━━━━━━━━━━━━━━━\n**{title}**"
         if description:
             section += f"\n{description}"
         if footer:
