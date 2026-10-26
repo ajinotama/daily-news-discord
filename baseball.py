@@ -16,7 +16,9 @@ API_KEY = os.environ["OPENAI_API_KEY"]
 WEBHOOK_URL = os.environ["DISCORD_BASEBALL_WEBHOOK_URL"]
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 RSS_URL = "https://news.google.com/rss/search"
-NPB_URL = "https://npb.jp/scores/"
+NPB_URL = "https://baseball.yahoo.co.jp/npb/standings/"
+NPB_SCORES_URL = "https://baseball.yahoo.co.jp/npb/schedule/"
+MLB_STANDINGS_URL = "https://www.baseball-reference.com/leagues/MLB-standings.shtml"
 MLB_API = "https://statsapi.mlb.com/api/v1"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36"
 
@@ -85,7 +87,7 @@ def summarize(articles):
         raise RuntimeError("直近48時間以内の野球ニュースを取得できませんでした。")
     client = OpenAI(api_key=API_KEY)
     prompt = f"""
-日本語の野球ニュース編集者として、NPBとMLBの候補から重複を避けて重要なニュースを最大3件選ぶ。
+日本語の野球ニュース編集者として、NPBとMLBの候補から重複を避けて重要なニュースを最大3件選ぶ。タイトルは内容を保ち、スマホで読みやすい45文字以内に短縮する。
 記事にない情報、試合結果、順位、数字を作らない。NPBとMLB両方に良い記事があれば両方扱う。
 各 summary は必ず3行で、各行は「・」から始める:
 1行目: 何が起きたか
@@ -112,7 +114,7 @@ JSONのみで返す。summaryは改行を含む3行の文字列にする。形�
             lines.append("記事本文で詳細を確認できます。" if len(lines) == 2 else "記事の詳細を確認中です。")
         news.append({
             "category": clean(item.get("category", "野球")),
-            "title": clean(item.get("title", ""))[:240],
+            "title": clean(item.get("title", ""))[:80],
             "summary": "\n".join("・" + line for line in lines),
             "url": url
         })
@@ -222,27 +224,33 @@ def get_npb_standings():
 
 
 def get_mlb_standings():
-    params = urllib.parse.urlencode({
-        "leagueId": "103,104",
-        "season": datetime.now(JST).year,
-        "standingsTypes": "regularSeason",
-    })
-    data = json.loads(http_get(MLB_API + "/standings?" + params).decode("utf-8"))
-    result = []
-    for record in data.get("records", []):
-        division = record.get("division", {}).get("name", "Division")
+    """Scrape public standings tables from Baseball-Reference HTML, without a stats API."""
+    parser = TableParser()
+    parser.feed(http_get(MLB_STANDINGS_URL, timeout=15).decode("utf-8", errors="replace"))
+    divisions = []
+    # Baseball-Reference publishes AL/NL divisions as separate HTML tables.
+    for table in parser.tables:
         rows = []
-        for team in record.get("teamRecords", []):
-            rows.append({
-                "name": team.get("team", {}).get("name", "Unknown"),
-                "wins": team.get("wins", 0),
-                "losses": team.get("losses", 0),
-                "pct": team.get("winningPercentage", "-"),
-                "gb": team.get("gamesBack", "-"),
-                "rank": team.get("divisionRank", "?"),
-            })
-        result.append((division, rows))
-    return result
+        for row in table:
+            cells = [cell.strip() for cell in row if cell.strip()]
+            joined = " ".join(cells).lower()
+            if not cells or any(x in joined for x in ("team", "tm", "wins", "won", "lost", "w-l%")):
+                continue
+            # Team rows have a team name followed by W, L, and usually PCT/GB values.
+            if len(cells) >= 3 and re.fullmatch(r"\\d{1,3}", cells[1]) and re.fullmatch(r"\\d{1,3}", cells[2]):
+                rows.append({
+                    "name": cells[0].rstrip("zwy*"),
+                    "wins": cells[1],
+                    "losses": cells[2],
+                    "pct": cells[3] if len(cells) > 3 else "-",
+                    "gb": cells[4] if len(cells) > 4 else "-"
+                })
+        if len(rows) == 5:
+            divisions.append(rows)
+    if len(divisions) < 6:
+        raise ValueError(f"Baseball-Reference HTML standings parse failed (tables={len(divisions)})")
+    names = ["AL東地区", "AL中地区", "AL西地区", "NL東地区", "NL中地区", "NL西地区"]
+    return list(zip(names, divisions[:6]))
 
 
 def get_mlb_recent_results():
@@ -286,48 +294,47 @@ def standings_embeds():
     embeds = []
     npb = get_npb_standings()
     if npb:
-        for league, rows in zip(("セ・リーグ", "パ・リーグ"), npb):
-            lines = []
-            for rank, row in enumerate(rows, 1):
-                # NPB official table columns commonly: team, games, wins, losses, ties, pct, games back.
-                team = row[0]
-                stats = "　".join(row[1:])
-                lines.append(f"{rank}. **{team}**　{stats}")
-            embeds.append({
-                "title": f"📊 NPB {league}順位表",
-                "description": "\n".join(lines)[:4000],
-                "url": NPB_URL,
-                "color": 0x397D76,
-                "footer": {"text": "出典: NPB公式 勝敗表"}
-            })
+        lines = ["**セ・リーグ**"]
+        for rank, row in enumerate(npb[0][:3], 1):
+            lines.append(f"{rank}. {' '.join(row[:6])}")
+        lines.append("\n**パ・リーグ**")
+        for rank, row in enumerate(npb[1][:3], 1):
+            lines.append(f"{rank}. {' '.join(row[:6])}")
+        embeds.append({
+            "title": "📊 NPB順位表（上位3球団）",
+            "description": "\n".join(lines)[:4000],
+            "url": NPB_URL,
+            "color": 0x397D76,
+            "footer": {"text": "出典: Yahoo! JAPAN プロ野球順位表"}
+        })
     else:
         embeds.append({
-            "title": "📊 NPB セ・パ順位表",
-            "description": f"[NPB公式の勝敗表を見る ↗]({NPB_URL})\n順位データの自動取得に失敗したため、数値は表示していません。",
+            "title": "📊 NPB順位表",
+            "description": f"[順位表を開く ↗]({NPB_URL})\n順位データを自動取得できませんでした。リンク先で最新情報を確認できます。",
             "url": NPB_URL,
             "color": 0x397D76
         })
 
     try:
         mlb = get_mlb_standings()
+        lines = []
         for division, rows in mlb:
-            lines = [
-                f"{row['rank']}. **{row['name']}**　{row['wins']}-{row['losses']}　勝率 {row['pct']}　差 {row['gb']}"
-                for row in rows
-            ]
-            embeds.append({
-                "title": "🇺🇸 MLB " + division,
-                "description": "\n".join(lines)[:4000],
-                "url": "https://www.mlb.com/standings",
-                "color": 0x2463A6,
-                "footer": {"text": "出典: MLB Stats API / レギュラーシーズン"}
-            })
+            top = rows[:3]
+            compact = " / ".join(f"{r['name']} {r['wins']}-{r['losses']}" for r in top)
+            lines.append(f"**{division}**\n{compact}")
+        embeds.append({
+            "title": "🇺🇸 MLB順位表（各地区上位3球団）",
+            "description": "\n\n".join(lines)[:4000],
+            "url": MLB_STANDINGS_URL,
+            "color": 0x2463A6,
+            "footer": {"text": "MLBはア・リーグ／ナ・リーグ各3地区。各地区上位3球団を表示"}
+        })
     except Exception as exc:
         print(f"MLB順位表取得失敗: {type(exc).__name__}: {exc}")
         embeds.append({
             "title": "🇺🇸 MLB順位表",
-            "description": "[MLB公式順位表を見る ↗](https://www.mlb.com/standings)\n自動取得に失敗したため、数値は表示していません。",
-            "url": "https://www.mlb.com/standings",
+            "description": f"[MLB順位表を見る ↗]({MLB_STANDINGS_URL})\nHTMLからの取得に失敗したため、数値は表示していません。",
+            "url": MLB_STANDINGS_URL,
             "color": 0x2463A6
         })
     return embeds
@@ -419,7 +426,7 @@ def post(news):
         chunks.append(current.rstrip())
 
     for index, chunk in enumerate(chunks, 1):
-        payload = {"content": chunk, "allowed_mentions": {"parse": []}}
+        payload = {"content": chunk, "flags": 4, "allowed_mentions": {"parse": []}}
         request = urllib.request.Request(
             WEBHOOK_URL,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
