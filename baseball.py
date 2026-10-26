@@ -109,8 +109,8 @@ JSONのみで返す。形式: {{"news":[{{"category":"NPB・プロ野球また�
         if isinstance(raw_lines, list):
             lines = [clean(str(line)).lstrip("・-• ").strip() for line in raw_lines if clean(str(line))]
         else:
-            summary_text = str(item.get("summary", "")).replace("\\r", "\\n")
-            lines = re.split(r"\\s*(?=・)|\\s*[／/]\\s*|\\n+", summary_text)
+            summary_text = str(item.get("summary", "")).replace("\r", "\n")
+            lines = re.split(r"\s*(?=・)|\s*[／/]\s*|\n+", summary_text)
             lines = [clean(line).lstrip("・-• ").strip() for line in lines if clean(line).strip(" ・-•")]
         lines = lines[:3]
         if len(lines) != 3:
@@ -131,7 +131,7 @@ title: {item.get('title','')} source title: {source.get('title','')} description
             source = next((a for a in articles if a["url"] == url), {})
             title = clean(item.get("title", source.get("title", "野球ニュース")))
             lines = [title.rstrip("。") + "。", clean(source.get("summary", ""))[:120] or "記事本文で詳細を確認してください。", "詳しい背景や今後の動向はリンク先の記事で確認できます。"]
-        news.append({"category": clean(item.get("category", "野球")), "title": clean(item.get("title", ""))[:80], "summary": "\\n".join("・" + line for line in lines), "url": url})
+        news.append({"category": clean(item.get("category", "野球")), "title": clean(item.get("title", ""))[:80], "summary": "\n".join("・" + line for line in lines), "url": url})
     if not news:
         raise RuntimeError("AIが有効な野球ニュースを返しませんでした。")
     return news
