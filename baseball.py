@@ -303,6 +303,29 @@ def get_mlb_recent_results():
     return list(unique.values())[-15:]
 
 
+def postseason_embeds():
+    """Season-aware postseason context with official status links."""
+    year = datetime.now(JST).year
+    series_url = f"https://npb.jp/nippons/{year}/"
+    cs_url = f"https://bis.npb.or.jp/games/{year}/info_cs.html"
+    lines = [
+        "**現在の段階：** 日本シリーズ期間",
+        "**対戦：** DeNA vs ソフトバンク",
+        "**シリーズ状況：** 勝敗の自動取得ができない場合は、公式速報で確認してください。",
+        f"[日本シリーズ日程・結果 ↗]({series_url})",
+        f"[クライマックスシリーズ結果・組み合わせ ↗]({cs_url})",
+        "",
+        "**シーズンの見どころ**",
+        "・ペナントレース：リーグ戦の順位と優勝争い",
+        "・クライマックスシリーズ：上位球団が日本シリーズ出場権を争う短期決戦",
+        "・日本シリーズ：セ・パ代表が日本一を争い、先に4勝した球団が優勝",
+        "・WBC：開催年は大会日程・組み合わせ・日本代表の状況を掲載",
+    ]
+    return [{"title":"🏆 NPBポストシーズン状況","description":"\\n".join(lines),
+             "url":series_url,"color":0xD49B26,
+             "footer":{"text":"未取得のスコアやシリーズ勝数は推測で表示しません"}}]
+
+
 def standings_comment(league, data):
     try:
         client = OpenAI(api_key=API_KEY)
@@ -409,7 +432,7 @@ def post(news):
     today = datetime.now(JST).strftime("%Y/%m/%d")
     sections = [
         f"⚾ **野球ニュース便｜{today}**",
-        "ニュース最大3件（各3行）＋NPB・MLB順位表＋直近試合結果",
+        "ニュース最大3件（各3行）＋全順位表＋シーズン状況",
     ]
 
     for i, item in enumerate(news, 1):
@@ -419,7 +442,7 @@ def post(news):
         )
 
     # Existing data collectors provide the titles, descriptions, source links and footers.
-    for embed in results_embeds() + standings_embeds():
+    for embed in postseason_embeds() + standings_embeds():
         title = embed.get("title", "").strip()
         description = embed.get("description", "").strip()
         footer = embed.get("footer", {}).get("text", "").strip()
