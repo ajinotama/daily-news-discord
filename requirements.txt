@@ -1,3 +1,4 @@
 feedparser
 openai
 trafilatura
+table2ascii
