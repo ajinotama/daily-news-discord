@@ -372,25 +372,54 @@ def results_embeds():
 
 
 def post(news):
+    """Post as regular Discord messages rather than embeds, using the available mobile width."""
     today = datetime.now(JST).strftime("%Y/%m/%d")
-    embeds = [{
-        "title": f"⚾ 野球ニュース便　{today}",
-        "description": "野球ニュース最大3件（各3行）＋NPB・MLB順位表＋MLB直近試合結果。",
-        "color": 0x397D76
-    }]
+    sections = [
+        f"⚾ **野球ニュース便｜{today}**",
+        "ニュース最大3件（各3行）＋NPB・MLB順位表＋直近試合結果",
+    ]
+
     for i, item in enumerate(news, 1):
-        embeds.append({
-            "title": f"⚾ {item['title']}"[:256],
-            "description": f"{item['summary']}\n\n[記事を読む ↗]({item['url']})"[:4000],
-            "color": 0x397D76 if "NPB" in item["category"] or "プロ野球" in item["category"] else 0x2463A6,
-            "footer": {"text": f"ニュース {i} / {len(news)}"}
-        })
-    embeds.extend(results_embeds())
-    embeds.extend(standings_embeds())
-    # Discord accepts at most 10 embeds per message; send all sections in batches.
-    chunks = [embeds[i:i + 10] for i in range(0, len(embeds), 10)]
+        sections.append(
+            f"\n⚾ **ニュース {i}/{len(news)}｜{item['title']}**\n"
+            f"{item['summary']}\n[記事を読む ↗]({item['url']})"
+        )
+
+    # Existing data collectors provide the titles, descriptions, source links and footers.
+    for embed in results_embeds() + standings_embeds():
+        title = embed.get("title", "").strip()
+        description = embed.get("description", "").strip()
+        footer = embed.get("footer", {}).get("text", "").strip()
+        url = embed.get("url", "").strip()
+        section = f"\n\n**{title}**"
+        if description:
+            section += f"\n{description}"
+        if footer:
+            section += f"\n_{footer}_"
+        elif url and f"]({url})" not in section:
+            section += f"\n[公式ページを見る ↗]({url})"
+        sections.append(section)
+
+    # Discord message content has a 2,000-character limit. Split on section/line
+    # boundaries so each message remains readable on mobile without narrow embed cards.
+    text = "\n".join(sections)
+    lines = text.splitlines()
+    chunks, current = [], ""
+    for line in lines:
+        if len(current) + len(line) + 1 > 1900 and current:
+            chunks.append(current.rstrip())
+            current = ""
+        if len(line) > 1900:
+            # Avoid dropping unusually long headlines or table rows.
+            while len(line) > 1900:
+                chunks.append(line[:1900])
+                line = line[1900:]
+        current += line + "\n"
+    if current.strip():
+        chunks.append(current.rstrip())
+
     for index, chunk in enumerate(chunks, 1):
-        payload = {"embeds": chunk, "allowed_mentions": {"parse": []}}
+        payload = {"content": chunk, "allowed_mentions": {"parse": []}}
         request = urllib.request.Request(
             WEBHOOK_URL,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
