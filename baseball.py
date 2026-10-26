@@ -309,9 +309,9 @@ def postseason_embeds():
     series_url = f"https://npb.jp/nippons/{year}/"
     cs_url = f"https://bis.npb.or.jp/games/{year}/info_cs.html"
     lines = [
-        "**現在の段階：** 日本シリーズ期間",
+        "**現在の段階：** 日本シリーズ期間（10月下旬）",
         "**対戦：** DeNA vs ソフトバンク",
-        "**シリーズ状況：** 勝敗の自動取得ができない場合は、公式速報で確認してください。",
+        "**シリーズ状況：** 最新の勝敗は公式速報で確認してください（未取得のスコアは表示しません）。",
         f"[日本シリーズ日程・結果 ↗]({series_url})",
         f"[クライマックスシリーズ結果・組み合わせ ↗]({cs_url})",
         "",
@@ -326,35 +326,29 @@ def postseason_embeds():
              "footer":{"text":"未取得のスコアやシリーズ勝数は推測で表示しません"}}]
 
 
-def ascii_table(headers, rows):
-    lines = ["| " + " | ".join(str(x) for x in headers) + " |", "| " + " | ".join(["---"] * len(headers)) + " |"]
-    for row in rows:
-        lines.append("| " + " | ".join(str(x) for x in row) + " |")
-    return "\n".join(lines)
+def discord_rows(headers, rows):
+    """Render standings as compact readable rows; Discord does not render Markdown tables."""
+    output = ["　".join(str(x) for x in headers)]
+    output.append("────────────")
+    output.extend("　".join(str(x) for x in row) for row in rows)
+    return "\\n".join(output)
 
 
 def standings_comment(league, data):
     try:
         client = OpenAI(api_key=API_KEY)
-        response = client.responses.create(model=MODEL, store=False, max_output_tokens=180,
-            input=f"{league}の順位表から、初心者にもわかる日本語のコメントを1文だけ作成。入力データにある順位や数字に基づき、推測を断定しない。前置き不要。データ:{json.dumps(data, ensure_ascii=False)}")
-        return clean(response.output_text or "首位と追う球団の差に注目しましょう。")[:220]
+        response = client.responses.create(
+            model=MODEL, store=False, max_output_tokens=180,
+            input=(
+                f"{league}の順位データを初心者向けに1文で解説する。"
+                "入力にない数字や順位を作らず、データから読み取れることだけ述べる。"
+                "前置き不要。データ:" + json.dumps(data, ensure_ascii=False)
+            ),
+        )
+        return clean(response.output_text or "順位と首位との差に注目しましょう。")[:220]
     except Exception as exc:
         print(f"{league}順位表AIコメント失敗: {type(exc).__name__}: {exc}")
-        return "首位と追う球団の差に注目しましょう。"
-
-
-def ascii_table(headers, rows):
-    """Render a fixed-width table for Discord using table2ascii."""
-    try:
-        from table2ascii import table2ascii
-        rendered = table2ascii(header=headers, body=[[str(cell) for cell in row] for row in rows])
-        fence = chr(96) * 3
-        return f"{fence}\n{rendered}\n{fence}"
-    except Exception as exc:
-        print(f"table2ascii変換失敗: {type(exc).__name__}: {exc}")
-        fence = chr(96) * 3
-        return f"{fence}\n" + " | ".join(headers) + "\n" + "\n".join(" | ".join(map(str, row)) for row in rows) + f"\n{fence}"
+        return "順位と首位との差に注目しましょう。"
 
 
 def standings_embeds():
@@ -369,7 +363,7 @@ def standings_embeds():
                 while len(values) < 7:
                     values.append("-")
                 rows.append([rank, values[0], values[1], values[2], values[3], values[4], values[5], values[6]])
-            npb_lines.append(f"**{league_name}**\n" + ascii_table(["順", "球団", "試合", "勝", "敗", "分", "勝率", "差"], rows))
+            npb_lines.append(f"**{league_name}**\n" + discord_rows(["順", "球団", "試合", "勝", "敗", "分", "勝率", "差"], rows))
         npb_lines += ["**項目：** 試合=消化試合、勝=勝利、敗=敗戦、分=引き分け、勝率=勝数÷(勝数+敗数)、差=首位との差",
                       "**AIコメント：** " + standings_comment("NPB", npb)]
         embeds.append({"title":"📊 NPB順位表（全12球団）","description":"\n\n".join(npb_lines)[:4000],"url":NPB_URL,"color":0x397D76,"footer":{"text":"出典: Yahoo! JAPAN プロ野球順位表"}})
@@ -382,7 +376,7 @@ def standings_embeds():
         for division, teams in mlb:
             rows = [[rank, team["name"], f'{team["wins"]}-{team["losses"]}', team["pct"], team["gb"]]
                     for rank, team in enumerate(teams, 1)]
-            division_lines.append(f"**{division}**\n" + ascii_table(["順", "球団", "勝-敗", "勝率", "差"], rows))
+            division_lines.append(f"**{division}**\n" + discord_rows(["順", "球団", "勝-敗", "勝率", "差"], rows))
         for start, league_name in [(0, "アメリカン・リーグ（AL）"), (3, "ナショナル・リーグ（NL）")]:
             description = "\n\n".join(division_lines[start:start+3])
             description += "\n\n**項目：** 勝-敗=勝利数-敗戦数、勝率=勝数÷試合数、差=地区首位からのゲーム差"
