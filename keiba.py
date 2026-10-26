@@ -13,7 +13,7 @@ from openai import OpenAI
 JST = timezone(timedelta(hours=9))
 API_KEY = os.environ["OPENAI_API_KEY"]
 WEBHOOK_URL = os.environ["DISCORD_KEIBA_WEBHOOK_URL"]
-MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+MODEL = os.getenv("OPENAI_MODEL") or "gpt-4.1-mini"
 RSS_URL = "https://news.google.com/rss/search"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36"
 
