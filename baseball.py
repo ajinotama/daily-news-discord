@@ -86,18 +86,15 @@ def summarize(articles):
     if not articles:
         raise RuntimeError("直近48時間以内の野球ニュースを取得できませんでした。")
     client = OpenAI(api_key=API_KEY)
-    prompt = f"""
-日本語の野球ニュース編集者として、NPBとMLBの候補から重複を避けて重要なニュースを最大3件選ぶ。タイトルは内容を保ち、スマホで読みやすい45文字以内に短縮する。
-記事にない情報、試合結果、順位、数字を作らない。NPBとMLB両方に良い記事があれば両方扱う。
-各 summary は必ず3行で、各行は「・」から始める:
-1行目: 何が起きたか
-2行目: 記事で確認できる数字や背景
-3行目: 意味または今後の焦点。推測を事実のように書かない
-urlは入力URLをそのまま使う。
-JSONのみで返す。summaryは改行を含む3行の文字列にする。形式: {{"news":[{{"category":"NPB・プロ野球またはMLB","title":"見出し","summary":"・出来事 / ・数字や背景 / ・意味や焦点","url":"入力URL"}}]}}
+    prompt = f'''
+日本語の野球ニュース編集者として、候補から重複を避けて重要なニュースを最大3件選ぶ。NPBとMLB両方に良い記事があれば両方扱う。
+タイトルは内容を保ち、スマホで読みやすい45文字以内に短縮する。記事にない情報、試合結果、順位、数字を作らない。
+各記事の summary_lines は必ず3要素の配列にする: [0]何が起きたか、[1]記事で確認できる数字や背景（不明ならその旨）、[2]意味または今後の焦点。
+各要素は簡潔な1文。行頭の「・」は付けない。urlは入力URLをそのまま使う。
+JSONのみで返す。形式: {{"news":[{{"category":"NPB・プロ野球またはMLB","title":"見出し","summary_lines":["出来事","数字や背景","意味や焦点"],"url":"入力URL"}}]}}
 候補:
 {json.dumps(articles, ensure_ascii=False)}
-"""
+'''
     response = client.responses.create(model=MODEL, store=False, max_output_tokens=3500, input=prompt)
     raw = (response.output_text or "").strip()
     raw = re.sub(r"^\x60{3}(?:json)?\s*|\s*\x60{3}$", "", raw)
@@ -108,19 +105,33 @@ JSONのみで返す。summaryは改行を含む3行の文字列にする。形�
         url = item.get("url", "")
         if url not in valid_urls:
             continue
-        summary_text = str(item.get("summary", "")).replace("\\r", "\\n")
-        lines = re.split(r"\\s*(?=・)", summary_text)
-        lines = [clean(line).lstrip("・-• ").strip() for line in lines if clean(line).strip(" ・-•")]
+        raw_lines = item.get("summary_lines")
+        if isinstance(raw_lines, list):
+            lines = [clean(str(line)).lstrip("・-• ").strip() for line in raw_lines if clean(str(line))]
+        else:
+            summary_text = str(item.get("summary", "")).replace("\\r", "\\n")
+            lines = re.split(r"\\s*(?=・)|\\s*[／/]\\s*|\\n+", summary_text)
+            lines = [clean(line).lstrip("・-• ").strip() for line in lines if clean(line).strip(" ・-•")]
         lines = lines[:3]
         if len(lines) != 3:
-            print(f"要約行数不足のため記事を除外: {item.get('title', '')} ({len(lines)}行)")
-            continue
-        news.append({
-            "category": clean(item.get("category", "野球")),
-            "title": clean(item.get("title", ""))[:80],
-            "summary": "\n".join("・" + line for line in lines),
-            "url": url
-        })
+            print(f"要約形式不正のため再生成: {item.get('title', '')} ({len(lines)}行)")
+            source = next((a for a in articles if a["url"] == url), {})
+            retry_prompt = f'''記事について事実を捏造せず、JSON配列3要素だけを返す。1=出来事、2=記事の数字や背景（なければその旨）、3=意味や今後の焦点。各要素は短い1文。
+title: {item.get('title','')} source title: {source.get('title','')} description: {source.get('summary','')}'''
+            try:
+                retry = client.responses.create(model=MODEL, store=False, max_output_tokens=500, input=retry_prompt)
+                parsed = json.loads((retry.output_text or "").strip())
+                if isinstance(parsed, list):
+                    lines = [clean(str(x)).strip() for x in parsed[:3] if clean(str(x))]
+                elif isinstance(parsed, dict) and isinstance(parsed.get("summary_lines"), list):
+                    lines = [clean(str(x)).strip() for x in parsed["summary_lines"][:3] if clean(str(x))]
+            except Exception as exc:
+                print(f"要約再生成失敗: {type(exc).__name__}: {exc}")
+        if len(lines) != 3:
+            source = next((a for a in articles if a["url"] == url), {})
+            title = clean(item.get("title", source.get("title", "野球ニュース")))
+            lines = [title.rstrip("。") + "。", clean(source.get("summary", ""))[:120] or "記事本文で詳細を確認してください。", "詳しい背景や今後の動向はリンク先の記事で確認できます。"]
+        news.append({"category": clean(item.get("category", "野球")), "title": clean(item.get("title", ""))[:80], "summary": "\\n".join("・" + line for line in lines), "url": url})
     if not news:
         raise RuntimeError("AIが有効な野球ニュースを返しませんでした。")
     return news
