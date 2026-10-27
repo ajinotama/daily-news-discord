@@ -309,29 +309,39 @@ def postseason_embeds():
     series_url = f"https://npb.jp/nippons/{year}/"
     cs_url = f"https://bis.npb.or.jp/games/{year}/info_cs.html"
     lines = [
-        "**現在の段階：** 日本シリーズ期間（10月下旬）",
-        "**対戦：** DeNA vs ソフトバンク",
-        "**シリーズ状況：** 最新の勝敗は公式速報で確認してください（未取得のスコアは表示しません）。",
-        f"[日本シリーズ日程・結果 ↗]({series_url})",
-        f"[クライマックスシリーズ結果・組み合わせ ↗]({cs_url})",
+        "**現在の段階**",
+        "・ポストシーズン",
+        "**日本シリーズ**",
+        "・最新の勝敗：公式速報で確認（未取得のスコアは表示しません）",
+        f"[日程・結果 ↗]({series_url})",
+        f"[CS結果・組み合わせ ↗]({cs_url})",
         "",
-        "**シーズンの見どころ**",
-        "・ペナントレース：リーグ戦の順位と優勝争い",
-        "・クライマックスシリーズ：上位球団が日本シリーズ出場権を争う短期決戦",
-        "・日本シリーズ：セ・パ代表が日本一を争い、先に4勝した球団が優勝",
-        "・WBC：開催年は大会日程・組み合わせ・日本代表の状況を掲載",
+        "**シーズンの流れ**",
+        "・ペナント：リーグ戦の順位・優勝争い",
+        "・CS：上位球団が日本シリーズ出場を争う",
+        "・日本シリーズ：先に4勝した球団が日本一",
+        "・WBC：開催時に日程・組み合わせ・日本代表情報を確認",
     ]
-    return [{"title":"🏆 NPBポストシーズン状況","description":"\\n".join(lines),
+    return [{"title":"🏆 NPBポストシーズン状況","description":"\n".join(lines),
              "url":series_url,"color":0xD49B26,
              "footer":{"text":"未取得のスコアやシリーズ勝数は推測で表示しません"}}]
 
 
 def discord_rows(headers, rows):
-    """Render standings as compact readable rows; Discord does not render Markdown tables."""
-    output = ["　".join(str(x) for x in headers)]
-    output.append("────────────")
-    output.extend("　".join(str(x) for x in row) for row in rows)
-    return "\\n".join(output)
+    """Render standings as short mobile-friendly team entries, not wide tables."""
+    output = []
+    if len(headers) == 8:  # NPB
+        for row in rows:
+            rank, team, games, wins, losses, draws, pct, gb = row
+            output.append(f"**{rank}位 {team}**")
+            output.append(f"試合 {games}｜{wins}勝 {losses}敗 {draws}分")
+            output.append(f"勝率 {pct}｜首位差 {gb}")
+    else:  # MLB
+        for row in rows:
+            rank, team, record, pct, gb = row
+            output.append(f"**{rank}位 {team}**")
+            output.append(f"勝敗 {record}｜勝率 {pct}｜地区首位差 {gb}")
+    return "\n".join(output)
 
 
 def standings_comment(league, data):
