@@ -95,10 +95,34 @@ JSONのみで返す。形式: {{"news":[{{"category":"NPB・プロ野球また�
 候補:
 {json.dumps(articles, ensure_ascii=False)}
 '''
-    response = client.responses.create(model=MODEL, store=False, max_output_tokens=3500, input=prompt)
+    response = client.responses.create(
+        model=MODEL,
+        store=False,
+        max_output_tokens=3500,
+        input=prompt,
+        text={"format": {"type": "json_object"}},
+    )
     raw = (response.output_text or "").strip()
     raw = re.sub(r"^\x60{3}(?:json)?\s*|\s*\x60{3}$", "", raw)
-    result = json.loads(raw)
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        # Retry once in JSON mode rather than failing the whole daily briefing.
+        print(f"ニュース要約JSON解析失敗。再生成します: {exc}")
+        retry_prompt = (
+            "次の野球ニュース要約を、正しいJSONオブジェクトに修正して返してください。"
+            "キーは news、値は配列。各要素は category, title, summary_lines（3要素配列）, url。"
+            "内容やURLを変更せず、JSON以外の文章を付けないでください。\\n"
+            + raw[:12000]
+        )
+        retry = client.responses.create(
+            model=MODEL,
+            store=False,
+            max_output_tokens=3500,
+            input=retry_prompt,
+            text={"format": {"type": "json_object"}},
+        )
+        result = json.loads((retry.output_text or "").strip())
     valid_urls = {a["url"] for a in articles}
     news = []
     for item in result.get("news", [])[:3]:
